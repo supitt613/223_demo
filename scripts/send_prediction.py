@@ -33,7 +33,7 @@ def get_recent_lotto_data(days: int = 30) -> list:
         response = supabase.from_('lotto539_data') \
                            .select('n1, n2, n3, n4, n5') \
                            .order('draw_date', desc=True) \
-                           .limit(days * 2) # 抓取多一點，確保有足夠的開獎期數
+                           .limit(days * 2) \
                            .execute()
         if response.data:
             return response.data
