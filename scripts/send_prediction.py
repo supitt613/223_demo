@@ -4,97 +4,78 @@ import os
 from collections import Counter
 from datetime import datetime
 
-# --- 1. 配置與驗證區 ---
-# 這些變數會從 GitHub Actions 的 Secrets 讀取
+# --- 配置 ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 def validate_config():
-    """確保所有必要的環境變數都已設定"""
-    keys = {
-        "SUPABASE_URL": SUPABASE_URL,
-        "SUPABASE_KEY": SUPABASE_KEY,
-        "LINE_ACCESS_TOKEN": LINE_ACCESS_TOKEN,
-        "LINE_USER_ID": LINE_USER_ID
-    }
-    missing = [k for k, v in keys.items() if not v]
-    if missing:
-        raise ValueError(f"錯誤：缺少環境變數：{', '.join(missing)}")
+    missing = [k for k, v in {"SUPABASE_URL": SUPABASE_URL, "SUPABASE_KEY": SUPABASE_KEY, "LINE_ACCESS_TOKEN": LINE_ACCESS_TOKEN, "LINE_USER_ID": LINE_USER_ID}.items() if not v]
+    if missing: raise ValueError(f"缺少環境變數：{', '.join(missing)}")
 
 validate_config()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- 2. 核心功能函式 ---
-
-def get_recent_lotto_data(limit: int = 60) -> list:
-    """從 Supabase 獲取最新開獎數據"""
+def get_recent_lotto_data(limit: int = 60):
     try:
+        # 關鍵修正：確保 order(draw_date, desc=True) 抓取最新資料
         response = (
             supabase.table('lotto539_data')
-            .select('n1, n2, n3, n4, n5')
+            .select('n1, n2, n3, n4, n5, draw_date')
             .order('draw_date', desc=True)
             .limit(limit)
             .execute()
         )
         return response.data if response.data else []
     except Exception as e:
-        print(f"Supabase 數據讀取失敗: {e}")
+        print(f"數據讀取失敗: {e}")
         return []
 
-def predict_lotto_numbers(recent_data: list) -> list:
-    """基於出現頻率的簡單預測模型"""
+def predict_lotto_numbers(recent_data):
     if not recent_data: return []
     all_numbers = []
     for row in recent_data:
         all_numbers.extend([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
-    number_counts = Counter(all_numbers)
-    # 獲取出現頻率最高的 5 個號碼
-    predicted = sorted(number_counts.most_common(5), key=lambda x: (-x[1], x[0]))
+    
+    counts = Counter(all_numbers)
+    # 頻率高者優先，頻率相同則號碼小者優先
+    predicted = sorted(counts.most_common(5), key=lambda x: (-x[1], x[0]))
     return [num for num, count in predicted]
 
 def send_line_msg(text):
-    """使用您提供的 LINE Messaging API 發送通知"""
     if not LINE_ACCESS_TOKEN: return
     url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json", 
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    payload = {
-        "to": LINE_USER_ID, 
-        "messages": [{"type": "text", "text": text}]
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": text}]}
     try:
-        # 使用 json=payload 自動處理 JSON 格式
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        print(f"✅ LINE 訊息發送成功 (Status: {response.status_code})")
+        print(f"✅ LINE 成功 ({response.status_code})")
     except Exception as e: 
-        print(f"❌ LINE 發送失敗: {e}")
-
-# --- 3. 主執行流程 ---
+        print(f"❌ LINE 失敗: {e}")
 
 def main():
-    print(f"[{datetime.now()}] 啟動 539 預測任務...")
+    print(f"[{datetime.now()}] 啟動預測任務...")
     recent_data = get_recent_lotto_data(limit=60)
     
     if not recent_data:
-        send_line_msg("⚠️ 預測失敗：無法從資料庫獲取歷史資料。")
+        send_line_msg("⚠️ 預測失敗：資料庫無數據。")
         return
 
-    predicted_numbers = predict_lotto_numbers(recent_data)
+    # 取得最新一筆資料的日期
+    latest_date = recent_data[0]['draw_date']
+    predicted_nums = predict_lotto_numbers(recent_data)
 
-    if predicted_numbers:
-        formatted_nums = ", ".join(map(lambda x: f"{int(x):02d}", predicted_numbers))
+    if predicted_nums:
+        formatted_nums = ", ".join(map(lambda x: f"{int(x):02d}", predicted_nums))
         message = (
-            f"🎯 539 預測通知 ({datetime.now().strftime('%Y-%m-%d')})\n"
-            f"✨ 推薦熱門號碼：{formatted_nums}\n\n"
-            f"💡 說明：此為基於最近 60 期開獎頻率統計。"
+            f"🎯 今彩 539 預測 ({datetime.now().strftime('%m/%d')})\n"
+            f"📈 數據統計至：{latest_date}\n"
+            f"✨ 推薦熱門號：{formatted_nums}\n\n"
+            f"💡 說明：取近 60 期頻率最高之號碼。"
         )
     else:
-        message = "❌ 無法產出預測號碼。"
+        message = "❌ 無法生成預測。"
 
     print(message)
     send_line_msg(message)
