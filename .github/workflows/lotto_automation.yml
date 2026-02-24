@@ -1,18 +1,18 @@
 name: Lotto 539 Automation Pro
 
 on: 
-  workflow_dispatch: # 手動點擊時，兩個 Job 都會執行
+  workflow_dispatch: # 允許手動觸發
   schedule:
-    # 晚上 9:30 (13:30 UTC) 爬蟲更新 (539 約 20:30 開獎)
-    - cron: '30 13 * * *'
-    # 早上 10:00 (02:00 UTC) 預測通知
-    - cron: '0 2 * * *'
+    - cron: '30 13 * * *' # 晚上 21:30 (13:30 UTC) 執行爬蟲
+    - cron: '0 2 * * *'   # 早上 10:00 (02:00 UTC) 執行預測
 
 jobs:
   scrape_and_update_data:
     runs-on: ubuntu-latest
-    # 只有在「早上的預測定時」觸發時才跳過，手動或晚上定時都會跑
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 13 * * *'
+    # 修正重點：手動觸發或晚上定時都會執行，不被 needs 綁架
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      github.event.schedule == '30 13 * * *'
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -29,8 +29,10 @@ jobs:
 
   send_prediction_notification:
     runs-on: ubuntu-latest
-    # 移除 needs，改為獨立執行，或是手動觸發時執行
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 2 * * *'
+    # 修正重點：移除 needs 避免死結，手動或早上定時都會執行
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      github.event.schedule == '0 2 * * *'
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
