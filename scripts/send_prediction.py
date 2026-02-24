@@ -1,84 +1,100 @@
 import requests
+from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import os
-from collections import Counter
 from datetime import datetime
+import re
 
-# --- 配置 ---
+# --- 1. 配置與初始化 ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-def validate_config():
-    missing = [k for k, v in {"SUPABASE_URL": SUPABASE_URL, "SUPABASE_KEY": SUPABASE_KEY, "LINE_ACCESS_TOKEN": LINE_ACCESS_TOKEN, "LINE_USER_ID": LINE_USER_ID}.items() if not v]
-    if missing: raise ValueError(f"缺少環境變數：{', '.join(missing)}")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("❌ 錯誤：請確保已在 GitHub Secrets 設定環境變數")
 
-validate_config()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def get_recent_lotto_data(limit: int = 60):
-    try:
-        # 關鍵修正：確保 order(draw_date, desc=True) 抓取最新資料
-        response = (
-            supabase.table('lotto539_data')
-            .select('n1, n2, n3, n4, n5, draw_date')
-            .order('draw_date', desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return response.data if response.data else []
-    except Exception as e:
-        print(f"數據讀取失敗: {e}")
-        return []
-
-def predict_lotto_numbers(recent_data):
-    if not recent_data: return []
-    all_numbers = []
-    for row in recent_data:
-        all_numbers.extend([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
+def loto539_scrape(p: int) -> list:
+    rows = []
+    url = f"https://www.lotto-8.com/listlto539.asp?indexpage={p}&orderby=new"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     
-    counts = Counter(all_numbers)
-    # 頻率高者優先，頻率相同則號碼小者優先
-    predicted = sorted(counts.most_common(5), key=lambda x: (-x[1], x[0]))
-    return [num for num, count in predicted]
-
-def send_line_msg(text):
-    if not LINE_ACCESS_TOKEN: return
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
-    payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": text}]}
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        print(f"✅ LINE 成功 ({response.status_code})")
-    except Exception as e: 
-        print(f"❌ LINE 失敗: {e}")
+        res = requests.get(url, headers=headers, timeout=15)
+        res.raise_for_status()
+        res.encoding = "utf-8"
+        soup = BeautifulSoup(res.text, "html.parser")
+        tds = soup.find_all("td")
+
+        i = 0
+        while i < len(tds) - 5:
+            # --- 這是您問的「要加在哪邊」的修正核心區塊 ---
+            date_raw = tds[i].text.strip()
+            
+            # 使用 Regex 精確找尋 xxx/xx/xx 格式，無視前後雜訊
+            match = re.search(r"(\d{2,3}/\d{1,2}/\d{1,2})", date_raw)
+            
+            if match:
+                try:
+                    date_clean = match.group(1)
+                    parts = date_clean.split('/')
+                    year_roc = int(parts[0])
+                    month = int(parts[1])
+                    day = int(parts[2])
+                    
+                    # 只有在月份日期合理時才轉換，避免 00-00 出現
+                    if month > 0 and month <= 12 and day > 0 and day <= 31:
+                        year_ad = year_roc + 1911
+                        formatted_date = f"{year_ad:04d}-{month:02d}-{day:02d}"
+
+                        # 提取號碼
+                        n1 = int(tds[i+1].text.strip())
+                        n2 = int(tds[i+2].text.strip())
+                        n3 = int(tds[i+3].text.strip())
+                        n4 = int(tds[i+4].text.strip())
+                        n5 = int(tds[i+5].text.strip())
+
+                        rows.append({
+                            "draw_date": formatted_date,
+                            "n1": n1, "n2": n2, "n3": n3, "n4": n4, "n5": n5
+                        })
+                        i += 6 # 成功處理一組
+                        continue
+                except:
+                    pass
+            i += 1 # 如果沒對到日期格式，往後看一格
+    except Exception as e:
+        print(f"⚠️ 頁面 {p} 爬取失敗: {e}")
+    return rows
 
 def main():
-    print(f"[{datetime.now()}] 啟動預測任務...")
-    recent_data = get_recent_lotto_data(limit=60)
+    print(f"[{datetime.now()}] 啟動數據同步任務...")
     
-    if not recent_data:
-        send_line_msg("⚠️ 預測失敗：資料庫無數據。")
+    scraped_data = []
+    # 掃描前 5 頁，確保 2/23 與之前的資料都能補齊
+    for page in range(1, 6):
+        print(f"🔍 正在掃描第 {page} 頁...")
+        scraped_data.extend(loto539_scrape(page))
+
+    if not scraped_data:
+        print("🛑 未發現數據。")
         return
 
-    # 取得最新一筆資料的日期
-    latest_date = recent_data[0]['draw_date']
-    predicted_nums = predict_lotto_numbers(recent_data)
-
-    if predicted_nums:
-        formatted_nums = ", ".join(map(lambda x: f"{int(x):02d}", predicted_nums))
-        message = (
-            f"🎯 今彩 539 預測 ({datetime.now().strftime('%m/%d')})\n"
-            f"📈 數據統計至：{latest_date}\n"
-            f"✨ 推薦熱門號：{formatted_nums}\n\n"
-            f"💡 說明：取近 60 期頻率最高之號碼。"
-        )
-    else:
-        message = "❌ 無法生成預測。"
-
-    print(message)
-    send_line_msg(message)
+    # 確保按日期排序
+    scraped_data.sort(key=lambda x: x['draw_date'])
+    
+    try:
+        # 使用 upsert，重複日期會自動更新，不重複會新增
+        supabase.table('lotto539_data').upsert(
+            scraped_data, 
+            on_conflict="draw_date"
+        ).execute()
+        
+        print(f"✅ 同步成功！最新一筆日期：{scraped_data[-1]['draw_date']}")
+    except Exception as e:
+        print(f"❌ 寫入失敗: {e}")
 
 if __name__ == "__main__":
     main()
