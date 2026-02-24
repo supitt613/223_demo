@@ -1,100 +1,125 @@
 import requests
-from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import os
+from collections import Counter
 from datetime import datetime
-import re
 
-# --- 1. 配置與初始化 ---
+# --- 1. 配置與驗證區 ---
+# 這些環境變數必須在 GitHub Secrets 中設定
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ 錯誤：請確保已在 GitHub Secrets 設定環境變數")
+def validate_config():
+    """驗證必要的環境變數"""
+    missing = [k for k, v in {
+        "SUPABASE_URL": SUPABASE_URL, 
+        "SUPABASE_KEY": SUPABASE_KEY, 
+        "LINE_ACCESS_TOKEN": LINE_ACCESS_TOKEN, 
+        "LINE_USER_ID": LINE_USER_ID
+    }.items() if not v]
+    
+    if missing:
+        raise ValueError(f"❌ 錯誤：缺少環境變數：{', '.join(missing)}")
 
+validate_config()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def loto539_scrape(p: int) -> list:
-    rows = []
-    url = f"https://www.lotto-8.com/listlto539.asp?indexpage={p}&orderby=new"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
+# --- 2. 核心功能函式 ---
+
+def get_recent_lotto_data(limit: int = 60):
+    """
+    從 Supabase 獲取最新開獎數據。
+    關鍵：使用 order('draw_date', desc=True) 確保 2026-02-23 排在最前面。
+    """
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status()
-        res.encoding = "utf-8"
-        soup = BeautifulSoup(res.text, "html.parser")
-        tds = soup.find_all("td")
-
-        i = 0
-        while i < len(tds) - 5:
-            # --- 這是您問的「要加在哪邊」的修正核心區塊 ---
-            date_raw = tds[i].text.strip()
-            
-            # 使用 Regex 精確找尋 xxx/xx/xx 格式，無視前後雜訊
-            match = re.search(r"(\d{2,3}/\d{1,2}/\d{1,2})", date_raw)
-            
-            if match:
-                try:
-                    date_clean = match.group(1)
-                    parts = date_clean.split('/')
-                    year_roc = int(parts[0])
-                    month = int(parts[1])
-                    day = int(parts[2])
-                    
-                    # 只有在月份日期合理時才轉換，避免 00-00 出現
-                    if month > 0 and month <= 12 and day > 0 and day <= 31:
-                        year_ad = year_roc + 1911
-                        formatted_date = f"{year_ad:04d}-{month:02d}-{day:02d}"
-
-                        # 提取號碼
-                        n1 = int(tds[i+1].text.strip())
-                        n2 = int(tds[i+2].text.strip())
-                        n3 = int(tds[i+3].text.strip())
-                        n4 = int(tds[i+4].text.strip())
-                        n5 = int(tds[i+5].text.strip())
-
-                        rows.append({
-                            "draw_date": formatted_date,
-                            "n1": n1, "n2": n2, "n3": n3, "n4": n4, "n5": n5
-                        })
-                        i += 6 # 成功處理一組
-                        continue
-                except:
-                    pass
-            i += 1 # 如果沒對到日期格式，往後看一格
+        # 您剛才問的這段程式碼就在這裡執行
+        response = (
+            supabase.table('lotto539_data')
+            .select('*')
+            .order('draw_date', desc=True) 
+            .limit(limit)
+            .execute()
+        )
+        return response.data if response.data else []
     except Exception as e:
-        print(f"⚠️ 頁面 {p} 爬取失敗: {e}")
-    return rows
+        print(f"❌ 數據讀取失敗: {e}")
+        return []
+
+def predict_lotto_numbers(recent_data: list) -> list:
+    """基於熱門頻率的預測模型"""
+    if not recent_data:
+        return []
+
+    all_numbers = []
+    for row in recent_data:
+        # 確保抓取 n1~n5 欄位
+        all_numbers.extend([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
+
+    # 計算頻率
+    number_counts = Counter(all_numbers)
+
+    # 獲取出現頻率最高的 5 個號碼
+    # 排序規則：頻率由高到低 (-x[1])，若頻率相同則按號碼由小到大 (x[0])
+    predicted = sorted(number_counts.most_common(5), key=lambda x: (-x[1], x[0]))
+    return [num for num, count in predicted]
+
+def send_line_msg(text: str):
+    """使用 LINE Messaging API 發送 Push Message"""
+    if not LINE_ACCESS_TOKEN: return
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+    }
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": text}]
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        print(f"✅ LINE 通知發送成功 (Status: {response.status_code})")
+    except Exception as e:
+        print(f"❌ LINE 發送失敗: {e}")
+
+# --- 3. 主執行流程 ---
 
 def main():
-    print(f"[{datetime.now()}] 啟動數據同步任務...")
+    print(f"[{datetime.now()}] 啟動 539 預測任務...")
     
-    scraped_data = []
-    # 掃描前 5 頁，確保 2/23 與之前的資料都能補齊
-    for page in range(1, 6):
-        print(f"🔍 正在掃描第 {page} 頁...")
-        scraped_data.extend(loto539_scrape(page))
-
-    if not scraped_data:
-        print("🛑 未發現數據。")
+    # 1. 抓取最新 60 期資料 (包含剛剛補進去的 2/23)
+    recent_data = get_recent_lotto_data(limit=60)
+    
+    if not recent_data:
+        msg = "⚠️ 預測失敗：無法從資料庫獲取足夠的歷史資料。"
+        print(msg)
+        send_line_msg(msg)
         return
 
-    # 確保按日期排序
-    scraped_data.sort(key=lambda x: x['draw_date'])
+    # 取得資料庫中最新一筆資料的日期 (用來確認資料是否有同步)
+    latest_db_date = recent_data[0]['draw_date']
     
-    try:
-        # 使用 upsert，重複日期會自動更新，不重複會新增
-        supabase.table('lotto539_data').upsert(
-            scraped_data, 
-            on_conflict="draw_date"
-        ).execute()
-        
-        print(f"✅ 同步成功！最新一筆日期：{scraped_data[-1]['draw_date']}")
-    except Exception as e:
-        print(f"❌ 寫入失敗: {e}")
+    # 2. 生成預測號碼
+    predicted_numbers = predict_lotto_numbers(recent_data)
+
+    if predicted_numbers:
+        # 格式化號碼，例如 8 變成 08
+        formatted_nums = ", ".join(map(lambda x: f"{int(x):02d}", predicted_numbers))
+        message = (
+            f"🎯 今彩 539 數據預測 ({datetime.now().strftime('%Y-%m-%d')})\n"
+            f"📈 數據統計截止至：{latest_db_date}\n"
+            f"✨ 推薦熱門號碼：{formatted_nums}\n\n"
+            f"💡 說明：此結果基於最近 60 期開獎頻率統計。"
+        )
+    else:
+        message = "❌ 警告：無法產出預測號碼，請檢查資料格式。"
+
+    print(message)
+    # 3. 發送 LINE
+    send_line_msg(message)
+    print("任務結束。")
 
 if __name__ == "__main__":
     main()
