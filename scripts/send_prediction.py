@@ -2,111 +2,102 @@ import requests
 from supabase import create_client, Client
 import os
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# 載入環境變數 (在 GitHub Actions 中會直接從 secrets 讀取)
-# from dotenv import load_dotenv
-# load_dotenv()
-
-# Supabase 連線資訊
+# --- 1. 配置與驗證區 ---
+# 這些變數會從 GitHub Actions 的 Secrets 讀取
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-LINE_NOTIFY_TOKEN = os.getenv("LINE_NOTIFY_TOKEN")
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-if not SUPABASE_URL or not SUPABASE_KEY or not LINE_NOTIFY_TOKEN:
-    raise ValueError("Supabase URL, Key, and Line Notify Token must be set as environment variables.")
+def validate_config():
+    """確保所有必要的環境變數都已設定"""
+    keys = {
+        "SUPABASE_URL": SUPABASE_URL,
+        "SUPABASE_KEY": SUPABASE_KEY,
+        "LINE_ACCESS_TOKEN": LINE_ACCESS_TOKEN,
+        "LINE_USER_ID": LINE_USER_ID
+    }
+    missing = [k for k, v in keys.items() if not v]
+    if missing:
+        raise ValueError(f"錯誤：缺少環境變數：{', '.join(missing)}")
 
+validate_config()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def get_recent_lotto_data(days: int = 30) -> list:
-    """
-    從 Supabase 獲取最近 N 天的樂透數據。
-    Args:
-        days (int): 要獲取的天數。
-    Returns:
-        list: 最近的樂透數據列表。
-    """
-    today = datetime.now()
-    # 考慮到開獎日期可能不是連續的，我們獲取最近 N 筆資料而不是 N 天內的資料
-    # 這裡假設我們需要足夠的數據來進行頻率分析，所以直接取最新的 N 筆
-    try:
-        response = supabase.from_('lotto539_data') \
-                           .select('n1, n2, n3, n4, n5') \
-                           .order('draw_date', desc=True) \
-                           .limit(days * 2) \
-                           .execute()
-        if response.data:
-            return response.data
-    except Exception as e:
-        print(f"Error fetching recent lotto data from Supabase: {e}")
-    return []
+# --- 2. 核心功能函式 ---
 
-def predict_lotto_numbers(recent_data: list) -> list:
-    """
-    根據最近的開獎數據，預測下期可能開出的號碼。
-    此為一個簡單的頻率分析模型：找出在最近數據中出現頻率最高的號碼。
-    Args:
-        recent_data (list): 最近的開獎數據。
-    Returns:
-        list: 預測的號碼列表。
-    """
-    if not recent_data:
+def get_recent_lotto_data(limit: int = 60) -> list:
+    """從 Supabase 獲取最新開獎數據"""
+    try:
+        response = (
+            supabase.table('lotto539_data')
+            .select('n1, n2, n3, n4, n5')
+            .order('draw_date', desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Supabase 數據讀取失敗: {e}")
         return []
 
+def predict_lotto_numbers(recent_data: list) -> list:
+    """基於出現頻率的簡單預測模型"""
+    if not recent_data: return []
     all_numbers = []
     for row in recent_data:
         all_numbers.extend([row['n1'], row['n2'], row['n3'], row['n4'], row['n5']])
-
-    # 計算每個號碼的出現頻率
     number_counts = Counter(all_numbers)
-
     # 獲取出現頻率最高的 5 個號碼
-    # 如果有相同頻率，則取號碼較小的
-    predicted_numbers = sorted(number_counts.most_common(5), key=lambda x: (-x[1], x[0]))
-    return [num for num, count in predicted_numbers]
+    predicted = sorted(number_counts.most_common(5), key=lambda x: (-x[1], x[0]))
+    return [num for num, count in predicted]
 
-def send_line_notification(message: str):
-    """
-    透過 Line Notify 發送通知。
-    Args:
-        message (str): 要發送的訊息內容。
-    """
-    line_notify_api = 'https://notify-api.line.me/api/notify'
+def send_line_msg(text):
+    """使用您提供的 LINE Messaging API 發送通知"""
+    if not LINE_ACCESS_TOKEN: return
+    url = "https://api.line.me/v2/bot/message/push"
     headers = {
-        'Authorization': f'Bearer {LINE_NOTIFY_TOKEN}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        "Content-Type": "application/json", 
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
-    payload = {'message': message}
-
+    payload = {
+        "to": LINE_USER_ID, 
+        "messages": [{"type": "text", "text": text}]
+    }
     try:
-        response = requests.post(line_notify_api, headers=headers, data=payload, timeout=10)
-        response.raise_for_status() # 檢查 HTTP 請求是否成功
-        print(f"Line notification sent. Status: {response.status_code}, Response: {response.json()}")
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Line notification: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred during Line notification: {e}")
+        # 使用 json=payload 自動處理 JSON 格式
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        print(f"✅ LINE 訊息發送成功 (Status: {response.status_code})")
+    except Exception as e: 
+        print(f"❌ LINE 發送失敗: {e}")
+
+# --- 3. 主執行流程 ---
 
 def main():
-    print("Starting lottery prediction and Line notification...")
-    recent_data = get_recent_lotto_data(days=60) # 獲取最近 60 期數據進行分析
-
+    print(f"[{datetime.now()}] 啟動 539 預測任務...")
+    recent_data = get_recent_lotto_data(limit=60)
+    
     if not recent_data:
-        message = "[539 預測] 無法獲取足夠的歷史數據進行預測。"
-        print(message)
-        send_line_notification(message)
+        send_line_msg("⚠️ 預測失敗：無法從資料庫獲取歷史資料。")
         return
 
     predicted_numbers = predict_lotto_numbers(recent_data)
 
     if predicted_numbers:
-        message = f"\n[539 預測] {datetime.now().strftime('%Y-%m-%d')} 預測號碼：\n{' '.join(map(str, predicted_numbers))}\n(此為基於歷史頻率的簡單預測，僅供參考。)"
+        formatted_nums = ", ".join(map(lambda x: f"{int(x):02d}", predicted_numbers))
+        message = (
+            f"🎯 539 預測通知 ({datetime.now().strftime('%Y-%m-%d')})\n"
+            f"✨ 推薦熱門號碼：{formatted_nums}\n\n"
+            f"💡 說明：此為基於最近 60 期開獎頻率統計。"
+        )
     else:
-        message = "[539 預測] 無法生成預測號碼。"
+        message = "❌ 無法產出預測號碼。"
 
     print(message)
-    send_line_notification(message)
-    print("Lottery prediction and Line notification finished.")
+    send_line_msg(message)
 
 if __name__ == "__main__":
     main()
