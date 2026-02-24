@@ -4,138 +4,94 @@ from supabase import create_client, Client
 import os
 from datetime import datetime
 
-# 載入環境變數 (在 GitHub Actions 中會直接從 secrets 讀取)
-# from dotenv import load_dotenv
-# load_dotenv()
-
-# Supabase 連線資訊
+# --- 1. 配置與初始化 ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Supabase URL and Key must be set as environment variables.")
+    raise ValueError("❌ 錯誤：請確保已在 GitHub Secrets 設定 SUPABASE_URL 與 SUPABASE_KEY")
 
+# 初始化 Supabase 客戶端
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def loto539_scrape(p: int) -> list:
     """
-    從指定頁面爬取大樂透 539 的開獎號碼。
-    Args:
-        p (int): 頁碼。
-    Returns:
-        list: 包含開獎日期的列表，每個元素是一個包含 [日期, n1, n2, n3, n4, n5] 的列表。
+    從指定頁面爬取 539 數據，並進行強健的日期轉換。
     """
     rows = []
     url = f"https://www.lotto-8.com/listlto539.asp?indexpage={p}&orderby=new"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
+    
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status() # 檢查 HTTP 請求是否成功
+        res = requests.get(url, headers=headers, timeout=15)
+        res.raise_for_status()
         res.encoding = "utf-8"
         soup = BeautifulSoup(res.text, "html.parser")
         tds = soup.find_all("td")
 
         i = 0
         while i < len(tds) - 5:
-            date_str = tds[i].text.strip()
-            if "/" in date_str:
-                # 修復：把多餘換行、空白都清掉，只留第一行日期
-                date_str = date_str.split("\n")[0].strip()
+            date_raw = tds[i].text.strip()
+            # 過濾包含斜線的日期字串
+            if "/" in date_raw:
                 try:
-                    # 將民國年轉換為西元年，並格式化為 YYYY-MM-DD
-                    # 網站日期格式為 112/02/23 (民國年)
+                    # 處理可能帶有換行符號的日期 (例如 115/02/23 \n 星期一)
+                    date_str = date_raw.split()[0].strip()
                     year_roc, month, day = map(int, date_str.split('/'))
-                    year_ad = year_roc + 1911
+                    year_ad = year_roc + 1911 # 民國轉西元
                     formatted_date = f"{year_ad:04d}-{month:02d}-{day:02d}"
 
-                    n1 = int(tds[i+1].text.strip())
-                    n2 = int(tds[i+2].text.strip())
-                    n3 = int(tds[i+3].text.strip())
-                    n4 = int(tds[i+4].text.strip())
-                    n5 = int(tds[i+5].text.strip())
+                    # 提取號碼
+                    nums = [int(tds[i+j].text.strip()) for j in range(1, 6)]
 
                     rows.append({
                         "draw_date": formatted_date,
-                        "n1": n1,
-                        "n2": n2,
-                        "n3": n3,
-                        "n4": n4,
-                        "n5": n5
+                        "n1": nums[0], "n2": nums[1], "n3": nums[2], "n4": nums[3], "n5": nums[4]
                     })
-                    i += 6
-                except ValueError as e:
-                    print(f"Skipping malformed data at index {i}: {date_str}, Error: {e}")
-                    i += 1 # 跳過此行，繼續處理下一行
+                    i += 6 # 成功處理一組，跳 6 格
+                except:
+                    i += 1
             else:
                 i += 1
-    except requests.exceptions.RequestException as e:
-        print(f"Error during web request: {e}")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"⚠️ 頁面 {p} 爬取失敗: {e}")
     return rows
 
-def get_existing_dates_from_db() -> set:
-    """
-    從 Supabase 資料庫中獲取所有已存在的開獎日期。
-    Returns:
-        set: 包含所有已存在日期的集合 (YYYY-MM-DD 格式)。
-    """
-    try:
-        response = supabase.from_('lotto539_data').select('draw_date').execute()
-        if response.data:
-            return {row['draw_date'] for row in response.data}
-    except Exception as e:
-        print(f"Error fetching existing dates from Supabase: {e}")
-    return set()
+def main():
+    print(f"[{datetime.now()}] 啟動數據同步任務...")
+    
+    scraped_data = []
+    # 策略：一次抓取前 3 頁，確保即使漏掉前幾天的資料也能補回來
+    for page in range(1, 4):
+        print(f"🔍 正在掃描第 {page} 頁...")
+        data = loto539_scrape(page)
+        scraped_data.extend(data)
 
-def insert_new_data_to_db(new_data: list):
-    """
-    將新的樂透數據插入到 Supabase 資料庫中。
-    Args:
-        new_data (list): 包含要插入數據的列表。
-    """
-    if not new_data:
-        print("No new data to insert.")
+    if not scraped_data:
+        print("🛑 未發現任何數據，請檢查目標網站是否正常。")
         return
 
+    # 按照日期排序
+    scraped_data.sort(key=lambda x: x['draw_date'])
+    
+    print(f"📊 掃描完成，準備處理 {len(scraped_data)} 筆資料...")
+
     try:
-        response = supabase.from_('lotto539_data').insert(new_data).execute()
-        if response.data:
-            print(f"Successfully inserted {len(response.data)} new records.")
-        elif response.count is not None:
-            print(f"Successfully inserted {response.count} new records.")
-        else:
-            print("Insert operation completed, but no data returned in response.")
+        # --- 關鍵修正：改用 upsert ---
+        # upsert 會根據 draw_date (Unique) 判斷，若重複則更新，不重複則新增。
+        # 這能完美解決「同步」的問題。
+        response = supabase.table('lotto539_data').upsert(
+            scraped_data, 
+            on_conflict="draw_date" # 確保根據日期來判斷衝突
+        ).execute()
+        
+        print(f"✅ 同步成功！已確認最新資料庫狀態。")
+        print(f"最新一筆日期為：{scraped_data[-1]['draw_date']}")
+        
     except Exception as e:
-        print(f"Error inserting data into Supabase: {e}")
-
-def main():
-    print("Starting lottery data scraping and update...")
-    all_scraped_rows = []
-    # 抓取多頁，可以根據需求調整頁數
-    # 網站大約每頁有 10 筆資料，抓取 190 頁約 1900 筆資料，足夠應付日常更新
-    for page in range(1, 10): # 為了快速測試，先抓取少量頁面，實際部署可增加頁數
-        print(f"Scraping page {page}...")
-        all_scraped_rows.extend(loto539_scrape(page))
-
-    existing_dates = get_existing_dates_from_db()
-    print(f"Found {len(existing_dates)} existing records in database.")
-
-    new_records_to_insert = []
-    for row in all_scraped_rows:
-        if row['draw_date'] not in existing_dates:
-            new_records_to_insert.append(row)
-
-    if new_records_to_insert:
-        # 按照日期排序，確保插入順序，避免潛在的資料庫衝突或邏輯問題
-        new_records_to_insert.sort(key=lambda x: x['draw_date'])
-        print(f"Found {len(new_records_to_insert)} new records to insert.")
-        insert_new_data_to_db(new_records_to_insert)
-    else:
-        print("No new lottery data found to update.")
-    print("Lottery data scraping and update finished.")
+        print(f"❌ 寫入 Supabase 失敗: {e}")
 
 if __name__ == "__main__":
     main()
